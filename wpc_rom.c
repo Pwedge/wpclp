@@ -26,9 +26,6 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  *
  *****************************************************************************/
-/******************************************************************************
- * Version 1.0  06/07/2010: Initial Release
- *****************************************************************************/
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,494 +36,290 @@
 #include <stdint.h>
 #include "wpc_lamp_patcher.h"
 
+// rom_ver_seq: "REV. ^-%XA" where '^' can be any character.
+static uint8_t rom_ver_seq[] = {0x52, 0x45, 0x56, 0x2e, 0x20, 0x00, 0x2d, 0x25, 0x58, 0x41};
 
-#define VERSION	"1.4"
-
-#define DBG(fmt, args...) if (debug) { printf(fmt, ## args); }
-#define STRTOHEX(x) strtoul((x), NULL, 16)
-#define STRTODEC(x) strtol((x), NULL, 10)
-
-#define MAX_INPUT_FILE_SZ	(1024 * 1024) /* 1MB */
-#define STRBUF_SZ	(256)
-
-int debug = 0;
-int force = 0;
-int skip_patch  = 0;
-int extra_delay = 0;
-char strbuf_g[STRBUF_SZ];
-
+// rom_ver_seq2: "REV. ^%MY-%XA" where '^' can be any character.
+static uint8_t rom_ver_seq2[] = {0x52, 0x45, 0x56, 0x2e, 0x20, 0x00, 0x25, 0x4d, 0x59, 0x2d, 0x25, 0x58, 0x41};
 
 /*******************************************************************************
- *
- ******************************************************************************/
-void prog_info(void)
-{
-    printf("==============================================================\n");
-    printf("*** WPC / WPC95 Lamp Matrix Driver Rom patcher ***\n");
-    printf("   version %s\n", VERSION);
-    printf("   (c) John Honeycutt, http://emmytech.com/arcade\n");
-    printf("       honeycutt7483@gmail.com\n");
-    printf("This program will update the lamp matrix driver code for WPC &\n");
-    printf("WPC95 game roms to eliminate 'ghosting' when using LEDs\n");
-    printf("==============================================================\n\n");
+*
+******************************************************************************/
+uint32_t calc_checksum(uint8_t *buf, int start, int sz) {
+	uint32_t csum = 0;
+	int end = start + sz;
+	int x;
+
+	for (x = start; x < end; x++) {
+		csum += buf[x];
+	}
+	return csum;
 }
 
 /*******************************************************************************
- *
- ******************************************************************************/
-void help_exit(char *name)
-{
-    prog_info();
-    printf("\nsyntax: %s [-f] [-e] [-n] <input rom filename> <patched rom filename>\n", name);
-    printf("   '-f' Optional 'force' parameter to continue even if original rom checksum\n");
-    printf("        is wrong.\n");
-    printf("   '-n' Optional 'no-patch' parameter to skip the patching phase.\n");    
-    printf("        Can be used to just update rom version and checksum without patching\n");
-    printf("        the driver.\n");
-    printf("   '-e' Optional 'extra delay' parameter.\n");
-    printf("        Without this option a 30uS delay will occur between clearing the\n");
-    printf("        matrix row/column and writing for the next period.\n");
-    printf("        (30uS is the delay inserted by the newer williams driver code.)\n");
-    printf("        Specifying this option causes an extra 26 to 33uS delay to be inserted \n");
-    printf("        instead of 30uS. The extra delay might help with problem boards.\n");
-    exit(0);
-}
+*
+* Returns: Offset of signature start or -1 for not found
+*
+******************************************************************************/
+int search_for_sig(unsigned char *bp, int size, uint8_t *sig, int sig_sz) {
+	int match = -1;
+	int x, y;
 
+	DBG("%s: search-sz=%d sig-sz=%d | %02x %02x %02x\n",
+	__FUNCTION__, size, sig_sz, bp[0], bp[1], bp[2]);
+
+	for (x=0; x < (size - sig_sz); x++) {
+		for(y=0; y < sig_sz; y++) {
+			//if (y > 0) printf("  tst: x=%d y=%d [%02x %02x %02x]\n", x, y, bp[x+0], bp[x+1], bp[x+2]);
+			if (sig[y] == 0x00) {
+				continue; // Variable data. skip check
+			}
+			
+			if (sig[y] != bp[x+y]) {
+				break;  // No match.
+			}
+		} //y
+		if (y == sig_sz) {
+			DBG("%s: Got match @ offset: 0x%04x (%d)\n", __FUNCTION__, x, x);
+			match = x;
+			break;
+		}
+	} //x
+
+	return match;
+}
 
 /*******************************************************************************
- *
- ******************************************************************************/
-char *get_text(char* prompt, char *text, size_t size)
-{
-    size_t i = 0;
+*
+* Search the ROM for the revision byte sequence
+*
+******************************************************************************/
+static int wpc_find_rom_ver_letter(wpc_rom_t *rom, char letter) {
+	int pos;
+	
+	DBG("%s: Search for sig1...\n", __FUNCTION__);
+	pos = search_for_sig(&(rom->image[0]),
+	rom->size,
+	rom_ver_seq,
+	sizeof(rom_ver_seq));
+	if (pos != -1) {
+		pos+= 5;
+		DBG("%s: Got sig1 match @ offset: 0x%04x (%d): letter='%c'\n", __FUNCTION__, pos, pos, rom->image[pos]);
+		return pos;
+	}
 
-    fputs(prompt, stdout);
-    fflush(stdout);
-    for ( ;; ) {
-        int ch = fgetc(stdin);
-        if ( ch == '\n' || ch == EOF ) {
-            break;
-        }
-        if ( i < size - 1 ) {
-            text[i++] = ch;
-        }
-    }
-    text[i] = '\0';
-    return text;
+	DBG("%s: Search for sig2...\n", __FUNCTION__);
+	pos = search_for_sig(&(rom->image[0]),
+	rom->size,
+	rom_ver_seq2,
+	sizeof(rom_ver_seq2));
+	if (pos != -1) {
+		pos+= 5;
+		rom->ver.game_ver_Lx_format = 1;
+		DBG("%s: Got sig2 match @ offset: 0x%04x (%d): letter='%c'\n", __FUNCTION__, pos, pos, rom->image[pos]);
+		return pos;
+	}
+
+	printf("Error: Unable to update game version Letter\n");
+	return -1;
 }
-
 
 /*******************************************************************************
- *
- ******************************************************************************/
-int load_file(FILE *fp, unsigned char *bufp, int max_sz)
-{
-    unsigned char *bp = bufp;
-    int cnt;
+*
+******************************************************************************/
+void wpc_print_rom_info(wpc_rom_t *rom, char* filename) {
+	printf("ROM Info\n--------\n");
+	if (filename != NULL) {
+		printf("\tFile: %s\n", filename);
+	}
+	printf("\tSize: %d M-bits (%dK-Bytes)\n", rom->size / ROM_SZ_TO_MBIT_DIVISOR, rom->size / ONE_KB);
+	
+	if (rom->cs.csum_valid) {
+		printf("\tChecksum Valid: %04x\n", rom->cs.csum);
+	} else {
+		printf("\tChecksum INVALID: Expected %04x Calculated %04x\n", rom->cs.csum, rom->cs.csum_calc);
+	}
+	if (rom->hard_error) {
+		goto exit_out;
+	}
+	
+	printf("\tSystem Version: %d.%d\n", rom->ver.os_major, rom->ver.os_minor);
+	if (rom->ver.version_format == GAME_VER_FORMAT_1) {
+		printf("\tGame Version (Newer format): %x.%x\n", rom->ver.game_major, rom->ver.game_minor);
+	} else {
+		if (rom->ver.game_ver_Lx_format == 1) {
+			printf("\tGame Version (Old format): %c(x)-%x\n", rom->ver.game_ver_char, rom->ver.game_major);
+		} else {
+			printf("\tGame Version (Old format): %c-%x\n", rom->ver.game_ver_char, rom->ver.game_major);
+		}
+	}
+	printf("\tSystem ROM Offset: %08x\n", rom->sys_rom_off);
 
-    while ( (cnt = fread(bp, 1, ONE_KB, fp)) > 0 ) {
-        bp+=cnt;
-    }
-    if ( ferror(fp) ) {
-        printf("%s: Error while reading input file: cnt=%d (%s)\n", __FUNCTION__, cnt, strerror(errno));
-        return -1;
-    }
-    if ( feof(fp) ) {
-        DBG("%s: EOF\n", __FUNCTION__);
-    }
-    else {
-        DBG("%s: EOF not set\n", __FUNCTION__);
-    }
-
-    cnt = bp-bufp;
-    DBG("%s: Read %d (0x%x) bytes\n", __FUNCTION__, cnt, cnt);
-    return cnt;
+	exit_out:
+	printf("---------------------------\n");
 }
-
 
 /*******************************************************************************
- *
- ******************************************************************************/
-int write_file(FILE *fp, unsigned char *bufp, int size)
-{
-    int            cnt = 0;
-    unsigned char *bp = bufp;
+*
+******************************************************************************/
+int wpc_validate_rom(wpc_rom_t *rom, wpc_rom_validate_level_t validate_level) {
+	int mbits;
+	uint32_t csum;
+	unsigned int osv_addr;
+	int offset;
+	unsigned char cs;
 
-    int wrt_size, wrt_cnt;
+	// Validate file size
+	mbits = rom->size / ROM_SZ_TO_MBIT_DIVISOR;
+	if ((rom->size % ROM_SZ_TO_MBIT_DIVISOR) ||
+			((mbits != 1) && (mbits != 2) && (mbits != 4) && (mbits != 8))) {
+		printf("Invalid Input file size: %d\n", rom->size);
+		printf("Expecting 128KB, 256KB, 512KB, or 1024KB\n");
+		return -1;
+	}
 
-    while ( cnt < size ) {
-        if ( (size - cnt) < ONE_KB ) {
-            wrt_size = size - cnt;
-        }
-        else {
-            wrt_size = ONE_KB;
-        }
-        wrt_cnt = fwrite(bp, 1, wrt_size, fp);
-        if ( wrt_cnt == -1 ) {
-            printf("\nwrite error: (%s)\n", strerror(errno));
-            return -1;
-        }
-        bp  += wrt_cnt;
-        cnt += wrt_cnt;
-    }
-    return cnt;
+	// Setup & Verify the checksum
+	rom->cs.cscw_off  = rom->size - 20;
+	rom->cs.csum_off  = rom->size - 18;
+	rom->cs.cscw      = ntohs(*(uint16_t *)&(rom->image[rom->cs.cscw_off]));
+	rom->cs.csum      = ntohs(*(uint16_t *)&(rom->image[rom->cs.csum_off]));
+	DBG("CSCW: %04x  CSum: %04x\n", rom->cs.cscw, rom->cs.csum);
+
+	csum = calc_checksum(rom->image, 0, rom->size);
+	csum &= 0xffff;
+	rom->cs.csum_calc = csum;
+	DBG("Calculated checksum: %08x\n", csum);
+
+	if (rom->cs.csum != csum) {
+		DBG("Checksum Mismatch: ROM=%04x calculated=%04x\n", rom->cs.csum, csum);
+		if (validate_level == WPC_VAL_FULL_CHECK) {
+			rom->hard_error = 1;
+			return -1;
+		}
+	} else {
+		rom->cs.csum_valid = 1;
+		DBG("Checksum Verified.\n");
+	}
+
+	// Find the OS Version and the Game Version
+	rom->sys_rom_off = rom->size - WPC_SYS_ROM_SZ;
+	osv_addr  = ntohs(*(uint16_t*)(&rom->image[rom->size - 2])) - 2;
+	osv_addr &= WPC_SYS_ROM_CODE_MASK;
+	DBG("SysRomOffset: %08x OSVerOffset: %08x OSVerAddr %08x\n",
+	rom->sys_rom_off, osv_addr, rom->sys_rom_off + osv_addr);
+	if ((rom->sys_rom_off + osv_addr + 1) >= rom->size) {
+		printf("Error: Invalid OSVersion offset: %08x\n", rom->sys_rom_off + osv_addr);
+		rom->hard_error = 1;
+		return -1;
+	}
+	rom->ver.os_major = rom->image[rom->sys_rom_off + osv_addr];
+	rom->ver.os_minor = rom->image[rom->sys_rom_off + osv_addr + 1];
+	DBG("System Version: %d.%d\n", rom->ver.os_major, rom->ver.os_minor);
+	
+	rom->ver.version_format = GAME_VER_FORMAT_0;
+	if ((rom->ver.os_major >=3) && (rom->ver.os_minor >=38)) {
+		rom->ver.version_format = GAME_VER_FORMAT_1;
+		offset = rom->size - 66;
+		rom->ver.game_major = rom->image[offset];
+		rom->ver.game_minor = rom->image[offset+1];
+
+		// Special case of major eq 0x0d otherwise validate game version against lower byte of checksum.
+		if ((rom->ver.game_major == 0x0d) && (rom->ver.game_minor == 0x00)) {
+			rom->ver.version_format = GAME_VER_FORMAT_0;
+		} else {
+			cs = ((rom->ver.game_major & 0x0f) << 4) | ((rom->ver.game_minor & 0xf0) >> 4);
+			if (cs != (rom->cs.csum & 0x00ff)) {
+				printf("Error: Low byte of checksum does not match game version.\n");
+				rom->cs.csum_valid = 0;
+				rom->hard_error = 1;
+				return -1;
+			}
+		}
+	}
+
+	if (rom->ver.version_format == GAME_VER_FORMAT_0) {
+		// Version is LSB of checksum word 0xD0 and above indicate prototype
+		rom->ver.game_major = rom->cs.csum & 0x00ff;
+		rom->ver.game_minor = 0;
+
+		if (rom->ver.game_major >=0xd0) {
+			rom->ver.game_ver_char = 'P';
+			rom->ver.game_major -= 0xd0;
+		} else {
+			// We are not a prototype rom. For unmodified WPC roms the letter should always be 'L'. However if this is the post-check we may have updated it to something else.
+			if ((offset = wpc_find_rom_ver_letter(rom, rom->ver.game_ver_char)) == -1) {
+				printf("Error: Game version string not found.\n");
+				return -1;
+			}
+			rom->ver.game_ver_char = rom->image[offset];
+		}
+	}
+
+	if (rom->ver.version_format == GAME_VER_FORMAT_1) {
+		DBG("Newer Game Ver format: %x.%x\n", rom->ver.game_major, rom->ver.game_minor);
+	} else {
+		DBG("Old Game Ver format: %c-%x\n", rom->ver.game_ver_char, rom->ver.game_major);
+	}
+
+	return 0;
 }
-
 
 /*******************************************************************************
- *
- ******************************************************************************/
-int get_new_rom_version(wpc_rom_t *rom, uint8_t *major, uint8_t *minor)
-{
-    char  *userline;
-    char  *ch;
-    unsigned long val;
+*
+******************************************************************************/
+int wpc_update_rom_version_checksum(wpc_rom_t *rom) {
+	uint32_t calc_csum;
+	uint8_t csum_lbyte;
+	int offset;
 
-    printf("\nThe original ROM Version is: REV. ");
-    if ( rom->ver.version_format == GAME_VER_FORMAT_1) {
-        printf("%x.%x\n", rom->ver.game_major, rom->ver.game_minor);
-    }
-    else {
-        if ( rom->ver.game_ver_Lx_format == 1 ) {
-            printf("%c(x)-%x\n", rom->ver.game_ver_char, rom->ver.game_major);
-        }
-        else {
-            printf("%c-%x\n", rom->ver.game_ver_char, rom->ver.game_major);
-        }
-    }
-    printf("A new version should be assigned to distinguish the new\n");
-    printf("rom from the original rom.\n");
-    printf("The format entered should be: ");
-    if ( rom->ver.version_format == GAME_VER_FORMAT_1) {
-        printf("<number1>.<number2>\n");
-        printf("<number1> can be 1 to 99  <number 2> can be 0 to 99\n");
-    }
-    else {
-        if ( rom->ver.game_ver_char == 'P' ) {
-            // Prototype rom
-            //
-            printf("P-<number>\n");
-            printf("<number> can be 1 to 2f\n");
-            printf("  example: VERSION>P-12\n");
-        }
-        else {
-            printf("<letter>-<number>\n");
-            printf("  <letter> can be A to Z except P\n");
-            printf("  <number> can be 1 to 99\n");
-            printf("    example: VERSION>M-25\n");
-        }
-    }
+	if (rom->ver.version_format == GAME_VER_FORMAT_1) {
+		csum_lbyte = ((rom->ver.game_major & 0x0f) << 4) | ((rom->ver.game_minor & 0xf0) >> 4);
 
-    userline = get_text("\nEnter VERSION>", strbuf_g, STRBUF_SZ);
-    DBG("Got version: '%s'\n", userline);
+		// Update the game version in the rom image.
+		offset = rom->size - 66;
+		rom->image[offset]   = rom->ver.game_major;
+		rom->image[offset+1] = rom->ver.game_minor;
+	} else {
+		if (rom->ver.game_ver_char == 'P') {
 
-    if ( rom->ver.version_format == GAME_VER_FORMAT_1) {
-        if ( (ch = strchr(userline, '.')) == NULL ) {
-            return -1;
-        }
-        if ( (ch - userline) < 1 ) {
-            return -1;
-        }
-        if ( strlen(userline) < (ch - userline + 2)) {
-            return -1;
-        }
-        *ch = '\0';
-        val = strtol(userline, NULL, 16);
-        if ( (val < 1) || (val > 0x99) ) {
-            return -1;
-        }
-        *major = val;
-        val = strtol(ch+1, NULL, 16);
-        if ( (val < 0) || (val > 0x99) ) {
-            return -1;
-        }
-        *minor = val;
-        DBG(" new ver: maj=%x min=%x\n", *major, *minor);
-    }
-    else {
-        if ( (ch = strchr(userline, '-')) == NULL ) {
-            return -1;
-        }
-        if ( (ch - userline) < 1 ) {
-            return -1;
-        }
-        if ( strlen(userline) < (ch - userline + 2)) {
-            return -1;
-        }
-        if ( rom->ver.game_ver_char == 'P' ) {
-            // Prototype rom
-            //
-            *major = 'P';
-            val = strtol(ch+1, NULL, 16);
-            if ( (val < 1) || (val > 0x2f) ) {
-                return -1;
-            }
-            *minor = val;            
-        }
-        else {
-            if ( !(isalpha(userline[0])) || (toupper(userline[0]) == 'P') ) {
-                return -1;
-            }
-            *major = toupper(userline[0]);
-            val = strtol(ch+1, NULL, 16);
-            if ( (val < 1) || (val > 0x99) ) {
-                return -1;
-            }
-            *minor = val;
-        }
-        DBG(" new ver: letter=%c num=%x(%d)\n", *major, *minor, *minor);
-    }
-    return 0;
+			// (Game version + 0xd0) is the checksum lower byte.
+			csum_lbyte = rom->ver.game_major + 0xd0;
+			DBG("%s: Prototype: New ver=%02x new csum lsb=%02x\n", __FUNCTION__, rom->ver.game_major, csum_lbyte);
+		} else {
+			// Update the version letter
+			DBG("Updating ROM version letter to '%c'\n", rom->ver.game_ver_char);
+			if ((offset = wpc_find_rom_ver_letter(rom, rom->ver.game_ver_char)) == -1) {
+				return -1;
+			}
+			rom->image[offset] = rom->ver.game_ver_char;
+
+			// Game version is the checksum lower byte.
+			csum_lbyte = rom->ver.game_major;
+			DBG("%s: new csum lsb=%02x\n", __FUNCTION__, rom->ver.game_major);
+		}
+	}
+
+	// Init Correction Word & Checksum word for calculating checksum.
+	*(uint16_t *)&(rom->image[rom->cs.cscw_off]) = htons(0x00FF);
+	*(uint16_t *)&(rom->image[rom->cs.csum_off]) = htons(0x00FF);
+	
+	calc_csum = calc_checksum(rom->image, 0, rom->size);
+	calc_csum &= 0xffff;
+	DBG("Calculated CSum: %04x\n", calc_csum);
+	
+	// Keep the high calculated byte and replace the low byte byte with the game version info.
+	rom->cs.csum = (calc_csum & 0xff00) | csum_lbyte;
+	rom->cs.csum_calc = rom->cs.csum;
+
+	// Adjust the correction word.
+	// cw-high byte = 0xff - calculated csum low byte
+	// cw-low byte  = 0xff - calculated csum high byte
+	rom->cs.cscw = ((0x00ff - (calc_csum & 0x00ff)) << 8) | (0xff - (calc_csum >> 8));
+	DBG("CSCW: %04x  CSum: %04x\n", rom->cs.cscw, rom->cs.csum);
+
+	// Update the image.
+	*(uint16_t *)&(rom->image[rom->cs.cscw_off]) = htons(rom->cs.cscw);
+	*(uint16_t *)&(rom->image[rom->cs.csum_off]) = htons(rom->cs.csum);
+	
+	return 0;
 }
-
-
-
-/*******************************************************************************
- * Function:    main
- * 
- * Description:
- *
- ******************************************************************************/
-int main (int argc, char **argv)
-{
-    char *infile  = NULL;
-    char *outfile = NULL;
-    int   opt_error = 0;
-    unsigned char *fbuf;
-    FILE          *fdi, *fdo;
-    int            fsize, l, m, n, rc;
-    uint8_t        vid1, vid2;
-    char           ch;
-    wpc_rom_t      rom;
-    int            update_not_needed;
-
-    // Parse the command line
-    //
-    for( n = 1; n < argc; n++ ) {
-        switch( (int)argv[n][0] ) {        // Check for option character.
-        case '-':
-            l = strlen( argv[n] );
-            for( m = 1; m < l; ++m ) {     //  Scan through options.
-                ch = (int)argv[n][m];
-                switch( ch )
-                {
-                case 'd':
-                    debug = 1;
-                    break;
-                case 'f':
-                    force = 1;
-                    break;
-                case 'e':
-                    extra_delay = 1;
-                    break;
-                case 'n':
-                    skip_patch = 1;
-                    break;
-                default:  
-                    printf( "Error: unknown option '-%c'\n", ch );
-                    opt_error = 1;
-                    break;
-                }
-            }
-            break;
-        default:
-            // Text
-            if ( infile == NULL ) {
-                infile = argv[n];
-            }
-            else if (outfile == NULL ) {
-                outfile = argv[n];
-            }
-            else {
-                // Already got all text options
-                printf( "Error: unexpected string option '%s'\n", argv[n]);
-                opt_error = 1;
-            }
-            break;
-        }
-    }
-
-    if ( opt_error || (outfile == NULL) ) {
-        help_exit(argv[0]);
-    }
-    prog_info();
-    
-    if ( strcmp(infile, outfile) == 0 ) {
-        printf("Error: Input and Output files must have different names\n");
-        exit(0);
-    }
-    
-    DBG("Input file:  '%s'\n", infile);
-    fdi = fopen(infile, "rb");
-    if (fdi == NULL) {
-        printf("Error: Failed to open input file: %s (%s)\n", infile, strerror(errno));
-        exit(1);
-    }
-    
-    fbuf = malloc(MAX_INPUT_FILE_SZ);
-    if ( fbuf == NULL ) {
-        printf("Error allocating memory: (%s)\n", strerror(errno));
-        exit(1);
-    }
-
-    // Read the input file
-    //
-    fsize = load_file(fdi, fbuf, MAX_INPUT_FILE_SZ);
-    fclose(fdi);
-
-    // Setup the rom struct
-    //
-    memset(&rom, 0, sizeof(rom));
-    rom.image = fbuf;
-    rom.size  = fsize;
-    DBG("Input ROM Size: %d M-bits (%dK-Bytes)\n\n", rom.size / ROM_SZ_TO_MBIT_DIVISOR, rom.size / ONE_KB);
-
-    // Validate input file
-    //
-    if ( force ) {
-        rc = wpc_validate_rom(&rom, WPC_VAL_CSUM_ERR_OK);
-    }
-    else {
-        rc = wpc_validate_rom(&rom, WPC_VAL_FULL_CHECK);
-    }
-
-    if ( rc != 0 ) {
-        printf("Error: ROM Validation Failed.\n");
-        wpc_print_rom_info(&rom, infile);
-        goto err_exit;
-    }
-    wpc_print_rom_info(&rom, infile);
-    
-    if ( rom.cs.csum_valid == 0 ) {
-        if ( force == 1 ) {
-            printf("***WARNING***: ROM Checksum Validation Failed.\n");
-            printf("               'force' option specified. continuing...\n");
-        }
-        else {
-            goto err_exit;
-        }
-    }
-    
-    // Patch the file
-    //
-    if ( skip_patch == 1 ) {
-        printf("\n***WARNING***: -n option specified.\n");
-        printf("               Skipping driver patch.\n");
-    }
-    else {
-        printf("\nPatching Lamp Matrix Driver...\n");
-        rc = wpc_patch_lamp_matrix(&rom, extra_delay, &update_not_needed);
-        if  ( rc != 0 ) {
-            printf("ERROR: Lamp matrix driver patch failed.\n");
-            if ( rc == INVALID_OPT_RC ) {
-                goto err_exit;
-            }
-            else {
-                goto err_exit_with_msg;
-            }
-        }
-        if ( update_not_needed ) {
-            printf("**** Driver Patch NOT Required ****\n");
-            printf("This ROM image already contains the updated lamp matrix driver code.\n");
-            goto err_exit;
-        }
-        printf("Done\n");
-    }
-
-    // Get new rom version from the user
-    //
-    if ( (get_new_rom_version(&rom, &vid1, &vid2)) != 0 ) {
-        printf("Invalid ROM Version entered.\n");
-        exit(1);
-    }
-    printf("\n");
-
-    // Update the version number and checksum
-    //
-    printf("Updating ROM versioning and checksum...\n");
-    if ( rom.ver.version_format == GAME_VER_FORMAT_1) {
-        rom.ver.game_major = vid1;
-        rom.ver.game_minor = vid2;
-    }
-    else {
-        rom.ver.game_ver_char = vid1;
-        rom.ver.game_major    = vid2;
-    }
-    rc = wpc_update_rom_version_checksum(&rom);
-    if ( rc != 0 ) {
-        printf("Error: ROM version/checksum update failed.\n");
-        goto err_exit_with_msg;
-    }
-
-    if ( debug ) {
-        printf("Debug Updated ROM Information:\n");
-        wpc_print_rom_info(&rom, NULL);
-    }
-    
-    // Write the output file
-    //
-    fdo = fopen(outfile, "rb");
-    if (fdo != NULL) {
-        printf("Error: output file aleady exists: %s\n", outfile);
-        fclose(fdo);
-        goto err_exit;
-    }
-    fdo = fopen(outfile, "wb");
-    if (fdo == NULL) {
-        printf("Error opening output file for writing: %s\n", outfile);
-        goto err_exit;
-    }
-    printf("Writing output file: %s\n", outfile);
-    rc = write_file(fdo, rom.image, rom.size);
-    fclose(fdo);
-    if ( rc != rom.size ) {
-        printf("Error Writing Output file. returncode=%d\n", rc);
-        goto err_exit;
-    }
-    printf("Updated ROM file write complete.\n");
-
-    // Validate the updated ROM
-    //
-    printf("Validating Updated ROM file...\n");
-    fdi = fopen(outfile, "rb");
-    if (fdi == NULL) {
-        printf("Error: Failed to open updated file: %s (%s)\n", outfile, strerror(errno));
-        exit(1);
-    }
-
-    fsize = load_file(fdi, fbuf, MAX_INPUT_FILE_SZ);
-    fclose(fdi);
-
-    memset(&rom, 0, sizeof(rom));
-    rom.image = fbuf;
-    rom.size  = fsize;
-    DBG("Updated ROM Size: %d M-bits (%dK-Bytes)\n\n", rom.size / ROM_SZ_TO_MBIT_DIVISOR, rom.size / ONE_KB);
-
-    rc = wpc_validate_rom(&rom, WPC_VAL_FULL_CHECK);
-    if ( rc != 0 ) {
-        printf("Error: Updated ROM Validation Failed.\n\n");
-        wpc_print_rom_info(&rom, infile);
-        goto err_exit;
-    }
-    printf("Updated ROM Validation Passed!\n\n");
-    wpc_print_rom_info(&rom, infile);
-
-    printf("Done.\n");
-    free(fbuf);
-    exit(0);
-
-err_exit_with_msg:
-    printf("***********************\n");
-    printf("The program exited because it had trouble analyzing the rom\n");
-    printf("file. If you belive your rom is valid and has the ghosting\n");
-    printf("issue then you can send an email to honeycutt7483@gmail.com\n");
-    printf("Please include the version of this program you are running\n");
-    printf("and the game rom name and version you are trying to patch.\n");
-    printf("Please attach the rom you are trying to patch to the email.\n");
-    printf("***********************\n");
-
-err_exit:
-    free(fbuf);
-    exit(1);
-}
-
