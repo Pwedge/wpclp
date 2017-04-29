@@ -69,6 +69,9 @@
 #define GAME_VER_FORMAT_0	(0)
 #define GAME_VER_FORMAT_1	(1)
 
+#define AUTO_VER_FORMAT_0   'Z'
+#define AUTO_VER_FORMAT_1   9
+
 #define INVALID_OPT_RC		(-2)
 
 typedef enum 

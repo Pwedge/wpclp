@@ -37,6 +37,7 @@
 #include <ctype.h>
 #include <string.h>
 #include <stdint.h>
+#include <assert.h>
 #include "wpc_lamp_patcher.h"
 
 
@@ -53,6 +54,7 @@ int debug = 0;
 int force = 0;
 int skip_patch  = 0;
 int extra_delay = 0;
+int auto_version = 0;
 char strbuf_g[STRBUF_SZ];
 
 
@@ -77,7 +79,7 @@ void prog_info(void)
 void help_exit(char *name)
 {
     prog_info();
-    printf("\nsyntax: %s [-f] [-e] [-n] <input rom filename> <patched rom filename>\n", name);
+    printf("\nsyntax: %s [-f] [-e] [-n] [-a] <input rom filename> <patched rom filename>\n", name);
     printf("   '-f' Optional 'force' parameter to continue even if original rom checksum\n");
     printf("        is wrong.\n");
     printf("   '-n' Optional 'no-patch' parameter to skip the patching phase.\n");    
@@ -89,6 +91,10 @@ void help_exit(char *name)
     printf("        (30uS is the delay inserted by the newer williams driver code.)\n");
     printf("        Specifying this option causes an extra 26 to 33uS delay to be inserted \n");
     printf("        instead of 30uS. The extra delay might help with problem boards.\n");
+    printf("   '-a' Optional 'automatically set version number' parameter.\n");    
+    printf("        Can be used to automatically set the version number without prompting.\n");
+    printf("        For ALPHA-NUMERIC version numbers, the ALPHA will be \'%c\'.\n", AUTO_VER_FORMAT_0);
+    printf("        For MAJOR.MINOR version numbers, the MAJOR will be \'%x\'.\n", AUTO_VER_FORMAT_1);
     exit(0);
 }
 
@@ -194,6 +200,28 @@ int get_new_rom_version(wpc_rom_t *rom, uint8_t *major, uint8_t *minor)
             printf("%c-%x\n", rom->ver.game_ver_char, rom->ver.game_major);
         }
     }
+
+    if (auto_version == 1) {
+        printf("Automatically setting ROM Version to: REV. ");
+        if (rom->ver.version_format == GAME_VER_FORMAT_0) {
+            *major = AUTO_VER_FORMAT_0;
+            *minor = rom->ver.game_major;
+            if (rom->ver.game_ver_Lx_format == 1) {
+                printf("%c(x)-%x\n", *major, *minor);
+            } else {
+                printf("%c-%x\n", *major, *minor);
+            }
+        } else if (rom->ver.version_format == GAME_VER_FORMAT_1) {
+            *major = AUTO_VER_FORMAT_1;
+            *minor = rom->ver.game_minor;
+            printf("%x.%x\n", *major, *minor);
+        } else {
+            assert(0);
+        }
+
+        return 0;
+    }
+
     printf("A new version should be assigned to distinguish the new\n");
     printf("rom from the original rom.\n");
     printf("The format entered should be: ");
@@ -321,6 +349,9 @@ int main (int argc, char **argv)
                     break;
                 case 'n':
                     skip_patch = 1;
+                    break;
+                case 'a':
+                    auto_version = 1;
                     break;
                 default:  
                     printf( "Error: unknown option '-%c'\n", ch );
